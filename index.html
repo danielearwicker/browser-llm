@@ -1,0 +1,1021 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Browser LLM</title>
+        <style>
+            * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+            body {
+                font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+                background: #0d1117;
+                color: #c9d1d9;
+                max-width: 960px;
+                margin: 0 auto;
+                padding: 20px;
+                line-height: 1.5;
+            }
+            h1 {
+                color: #58a6ff;
+                margin-bottom: 4px;
+                font-size: 1.6em;
+            }
+            h1 small {
+                color: #8b949e;
+                font-size: 0.5em;
+                font-weight: normal;
+            }
+            h2 {
+                color: #79c0ff;
+                font-size: 1.1em;
+                margin-bottom: 8px;
+            }
+            section {
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 16px;
+                margin-bottom: 16px;
+            }
+            button {
+                background: #238636;
+                color: #fff;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 16px;
+                cursor: pointer;
+                font-family: inherit;
+                font-size: 0.9em;
+            }
+            button:hover {
+                background: #2ea043;
+            }
+            button:disabled {
+                background: #21262d;
+                color: #484f58;
+                cursor: default;
+            }
+            button.danger {
+                background: #da3633;
+            }
+            button.danger:hover {
+                background: #f85149;
+            }
+            button.secondary {
+                background: #30363d;
+            }
+            button.secondary:hover {
+                background: #3d444d;
+            }
+            input,
+            select {
+                background: #0d1117;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-family: inherit;
+                font-size: 0.85em;
+            }
+            input[type="number"] {
+                width: 80px;
+            }
+            label {
+                font-size: 0.85em;
+                color: #8b949e;
+                margin-right: 12px;
+            }
+            textarea {
+                background: #0d1117;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 8px;
+                font-family: inherit;
+                font-size: 0.9em;
+                width: 100%;
+                resize: vertical;
+            }
+            .controls {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                align-items: center;
+                margin-bottom: 8px;
+            }
+            .stats {
+                font-size: 0.85em;
+                color: #8b949e;
+                margin-top: 8px;
+            }
+            .stat-val {
+                color: #58a6ff;
+                font-weight: bold;
+            }
+            canvas {
+                width: 100%;
+                background: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 4px;
+            }
+            #output {
+                background: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 12px;
+                margin-top: 8px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+                font-size: 0.9em;
+                min-height: 60px;
+                max-height: 300px;
+                overflow-y: auto;
+            }
+            #output .prompt-text {
+                color: #58a6ff;
+            }
+            #output .gen-text {
+                color: #7ee787;
+            }
+            .stock-entry {
+                margin-bottom: 12px;
+                padding: 8px;
+                background: #0d1117;
+                border: 1px solid #30363d;
+                border-radius: 4px;
+                font-size: 0.85em;
+            }
+            .stock-entry .step-label {
+                color: #8b949e;
+                font-size: 0.8em;
+            }
+            .stock-entry .prompt-text {
+                color: #58a6ff;
+            }
+            .stock-entry .gen-text {
+                color: #7ee787;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+            }
+            .warn {
+                color: #d29922;
+                font-size: 0.85em;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>Browser LLM <small>character-level transformer</small></h1>
+
+        <section id="data-section">
+            <h2>Training Data</h2>
+            <div class="controls">
+                <button onclick="selectDirectory()">Select Directory</button>
+                <span id="data-info" class="stats"></span>
+            </div>
+            <p class="warn" id="api-warn" style="display: none">
+                File System Access API not available. Use Chrome or Edge.
+            </p>
+        </section>
+
+        <section id="config-section">
+            <h2>Model</h2>
+            <div class="controls">
+                <label
+                    >Preset:
+                    <select id="preset" onchange="applyPreset()">
+                        <option value="small">Small (2L, d64)</option>
+                        <option value="medium" selected>
+                            Medium (4L, d128)
+                        </option>
+                        <option value="large">Large (6L, d192)</option>
+                    </select>
+                </label>
+            </div>
+            <div class="controls">
+                <label
+                    >Layers
+                    <input
+                        type="number"
+                        id="nLayers"
+                        value="4"
+                        min="1"
+                        max="12"
+                /></label>
+                <label
+                    >d_model
+                    <input
+                        type="number"
+                        id="dModel"
+                        value="128"
+                        min="16"
+                        max="512"
+                        step="16"
+                /></label>
+                <label
+                    >Heads
+                    <input type="number" id="nHeads" value="4" min="1" max="16"
+                /></label>
+                <label
+                    >d_ff
+                    <input
+                        type="number"
+                        id="dFF"
+                        value="512"
+                        min="64"
+                        max="2048"
+                        step="64"
+                /></label>
+                <label
+                    >Seq len
+                    <input
+                        type="number"
+                        id="maxSeqLen"
+                        value="256"
+                        min="32"
+                        max="1024"
+                        step="32"
+                /></label>
+            </div>
+            <div class="controls">
+                <label
+                    >Learning rate
+                    <input
+                        type="number"
+                        id="lr"
+                        value="0.0003"
+                        step="0.0001"
+                        min="0.00001"
+                        max="0.01"
+                /></label>
+                <label
+                    >Temperature
+                    <input
+                        type="number"
+                        id="temperature"
+                        value="0.8"
+                        step="0.1"
+                        min="0.1"
+                        max="2.0"
+                /></label>
+            </div>
+            <div id="param-count" class="stats"></div>
+        </section>
+
+        <section id="training-section">
+            <h2>Training</h2>
+            <div class="controls">
+                <button id="btn-start" onclick="startTraining()" disabled>
+                    Start Training
+                </button>
+                <button
+                    id="btn-stop"
+                    onclick="stopTraining()"
+                    disabled
+                    class="danger"
+                >
+                    Stop
+                </button>
+                <button id="btn-reset" onclick="resetModel()" class="secondary">
+                    Reset Model
+                </button>
+                <button
+                    id="btn-save"
+                    onclick="saveModel()"
+                    class="secondary"
+                    disabled
+                >
+                    Save Model
+                </button>
+                <button id="btn-load" onclick="loadModel()" class="secondary">
+                    Load Model
+                </button>
+            </div>
+            <div class="stats">
+                Step: <span class="stat-val" id="step-display">0</span> | Loss:
+                <span class="stat-val" id="loss-display">-</span> | Speed:
+                <span class="stat-val" id="speed-display">-</span> chars/s | LR:
+                <span class="stat-val" id="lr-display">-</span>
+            </div>
+            <canvas id="lossChart" height="150"></canvas>
+        </section>
+
+        <section id="prompt-section">
+            <h2>Generate</h2>
+            <div class="controls">
+                <textarea
+                    id="prompt"
+                    rows="2"
+                    placeholder="Enter a prompt and press Generate..."
+                ></textarea>
+            </div>
+            <div class="controls">
+                <button id="btn-gen" onclick="generate()" disabled>
+                    Generate
+                </button>
+                <label
+                    >Max tokens
+                    <input
+                        type="number"
+                        id="maxTokens"
+                        value="200"
+                        min="10"
+                        max="500"
+                /></label>
+            </div>
+            <div id="output"></div>
+        </section>
+
+        <section id="stock-section">
+            <h2>
+                Stock Prompts
+                <small style="color: #8b949e; font-weight: normal"
+                    >(evaluated every 1000 steps)</small
+                >
+            </h2>
+            <div id="stockPrompts">
+                <div class="stats">Waiting for training to start...</div>
+            </div>
+        </section>
+
+        <script>
+            // === State ===
+            let worker = null;
+            let textData = null; // Uint16Array
+            let textString = "";
+            let lossHistory = [];
+            let generating = false;
+
+            // === File System Access API ===
+            if (!window.showDirectoryPicker) {
+                document.getElementById("api-warn").style.display = "block";
+            }
+
+            async function selectDirectory() {
+                try {
+                    const dirHandle = await window.showDirectoryPicker();
+                    const files = [];
+                    await scanDir(dirHandle, "", files);
+
+                    if (files.length === 0) {
+                        document.getElementById("data-info").textContent =
+                            "No text files found.";
+                        return;
+                    }
+
+                    // Encode each file's text incrementally to avoid a single huge string
+                    const encoder = new CharTokenizer_inline();
+                    const sep = encoder.encode("\n\n");
+                    const chunks = [];
+                    let totalChars = 0;
+                    for (let i = 0; i < files.length; i++) {
+                        if (i > 0) chunks.push(sep);
+                        chunks.push(encoder.encode(files[i].text));
+                        totalChars += files[i].text.length + (i > 0 ? 2 : 0);
+                    }
+                    let totalTokens = chunks.reduce((s, c) => s + c.length, 0);
+                    textData = new Uint16Array(totalTokens);
+                    let off = 0;
+                    for (const c of chunks) { textData.set(c, off); off += c.length; }
+                    textString = ''; // not needed for training, avoid keeping huge string in memory
+
+                    document.getElementById("data-info").innerHTML =
+                        `<span class="stat-val">${files.length}</span> files, ` +
+                        `<span class="stat-val">${(totalChars / 1024).toFixed(1)}</span> KB text, ` +
+                        `<span class="stat-val">${totalTokens.toLocaleString()}</span> tokens`;
+                    document.getElementById("btn-start").disabled = false;
+                    updateParamCount();
+                } catch (e) {
+                    if (e.name !== "AbortError") console.error(e);
+                }
+            }
+
+            async function scanDir(dirHandle, prefix, files) {
+                for await (const [name, handle] of dirHandle) {
+                    const path = prefix ? prefix + "/" + name : name;
+                    if (handle.kind === "file" && isTextFile(name)) {
+                        const file = await handle.getFile();
+                        const text = await file.text();
+                        if (text.trim().length > 0)
+                            files.push({ name: path, text });
+                    } else if (handle.kind === "directory") {
+                        await scanDir(handle, path, files);
+                    }
+                }
+            }
+
+            function isTextFile(name) {
+                const ext = name.split(".").pop().toLowerCase();
+                return [
+                    "txt",
+                    "md",
+                    "text",
+                    "csv",
+                    "json",
+                    "js",
+                    "ts",
+                    "py",
+                    "html",
+                    "css",
+                    "xml",
+                    "yaml",
+                    "yml",
+                    "toml",
+                    "ini",
+                    "cfg",
+                    "log",
+                    "sh",
+                    "bat",
+                    "c",
+                    "h",
+                    "cpp",
+                    "java",
+                    "rs",
+                    "go",
+                    "rb",
+                    "swift",
+                    "kt",
+                ].includes(ext);
+            }
+
+            // Inline tokenizer for main thread
+            class CharTokenizer_inline {
+                constructor() {
+                    this.vocabSize = 128;
+                }
+                encode(str) {
+                    const ids = new Uint16Array(str.length);
+                    for (let i = 0; i < str.length; i++) {
+                        const c = str.charCodeAt(i);
+                        ids[i] = c < 128 ? c : 63;
+                    }
+                    return ids;
+                }
+                decode(ids) {
+                    let s = "";
+                    for (let i = 0; i < ids.length; i++)
+                        s += String.fromCharCode(ids[i]);
+                    return s;
+                }
+            }
+
+            // === Presets ===
+            const PRESETS = {
+                small: {
+                    nLayers: 2,
+                    dModel: 64,
+                    nHeads: 4,
+                    dFF: 256,
+                    maxSeqLen: 128,
+                },
+                medium: {
+                    nLayers: 4,
+                    dModel: 128,
+                    nHeads: 4,
+                    dFF: 512,
+                    maxSeqLen: 256,
+                },
+                large: {
+                    nLayers: 6,
+                    dModel: 192,
+                    nHeads: 6,
+                    dFF: 768,
+                    maxSeqLen: 256,
+                },
+            };
+
+            function applyPreset() {
+                const p = PRESETS[document.getElementById("preset").value];
+                document.getElementById("nLayers").value = p.nLayers;
+                document.getElementById("dModel").value = p.dModel;
+                document.getElementById("nHeads").value = p.nHeads;
+                document.getElementById("dFF").value = p.dFF;
+                document.getElementById("maxSeqLen").value = p.maxSeqLen;
+                updateParamCount();
+            }
+
+            function getConfig() {
+                return {
+                    vocabSize: 128,
+                    nLayers: +document.getElementById("nLayers").value,
+                    dModel: +document.getElementById("dModel").value,
+                    nHeads: +document.getElementById("nHeads").value,
+                    dFF: +document.getElementById("dFF").value,
+                    maxSeqLen: +document.getElementById("maxSeqLen").value,
+                };
+            }
+
+            function updateParamCount() {
+                const c = getConfig();
+                // Rough count: embeddings + per-layer + output
+                const emb = c.vocabSize * c.dModel + c.maxSeqLen * c.dModel;
+                const perLayer =
+                    4 * c.dModel * c.dModel +
+                    4 * c.dModel + // attn
+                    c.dModel * c.dModel +
+                    c.dModel + // out proj
+                    c.dModel * c.dFF +
+                    c.dFF + // ffn1
+                    c.dFF * c.dModel +
+                    c.dModel + // ffn2
+                    4 * c.dModel; // layer norms
+                const out = c.dModel * c.vocabSize + c.vocabSize + 2 * c.dModel;
+                const total = emb + c.nLayers * perLayer + out;
+                document.getElementById("param-count").innerHTML =
+                    `Parameters: <span class="stat-val">~${(total / 1000).toFixed(0)}K</span>`;
+            }
+            updateParamCount();
+            document
+                .querySelectorAll("#config-section input")
+                .forEach((el) =>
+                    el.addEventListener("change", updateParamCount),
+                );
+
+            // === Stock prompts (derived from training data) ===
+            function pickStockPrompts() {
+                return [
+                    "Elvis may have left the building, but",
+                    "In the beginning, there was",
+                    "We get the computers we deserve",
+                ];
+            }
+
+            // === Training ===
+            function startTraining() {
+                if (worker) worker.terminate();
+                lossHistory = [];
+                document.getElementById("step-display").textContent = "0";
+                document.getElementById("loss-display").textContent = "-";
+
+                const config = pendingLoad ? pendingLoad.config : getConfig();
+                const lr = pendingLoad
+                    ? pendingLoad.lr
+                    : +document.getElementById("lr").value;
+
+                worker = new Worker("train-worker.js");
+                worker.onmessage = handleWorkerMessage;
+
+                worker.postMessage({
+                    type: "init",
+                    config,
+                    lr,
+                    textData: textData,
+                    stockPrompts: pickStockPrompts(),
+                });
+
+                // If we have a pending model load, send it after init
+                if (pendingLoad) {
+                    const pl = pendingLoad;
+                    pendingLoad = null;
+                    const origOnMsg = worker.onmessage;
+                    worker.onmessage = function (e) {
+                        if (e.data.type === "ready") {
+                            worker.postMessage({
+                                type: "loadModel",
+                                config: pl.config,
+                                weights: pl.weights,
+                                optM: pl.optM,
+                                optV: pl.optV,
+                                optT: pl.optT,
+                                savedStep: pl.step,
+                                lr: pl.lr,
+                            });
+                        }
+                        origOnMsg(e);
+                    };
+                }
+
+                document.getElementById("btn-start").disabled = true;
+                document.getElementById("btn-stop").disabled = false;
+                document.getElementById("btn-gen").disabled = false;
+                document.getElementById("btn-save").disabled = false;
+            }
+
+            function stopTraining() {
+                if (worker) worker.postMessage({ type: "stop" });
+                document.getElementById("btn-start").disabled = false;
+                document.getElementById("btn-stop").disabled = true;
+            }
+
+            function resetModel() {
+                if (worker) {
+                    worker.terminate();
+                    worker = null;
+                }
+                lossHistory = [];
+                drawLossChart();
+                document.getElementById("step-display").textContent = "0";
+                document.getElementById("loss-display").textContent = "-";
+                document.getElementById("speed-display").textContent = "-";
+                document.getElementById("btn-start").disabled = !textData;
+                document.getElementById("btn-stop").disabled = true;
+                document.getElementById("btn-gen").disabled = true;
+                document.getElementById("btn-save").disabled = true;
+                document.getElementById("output").innerHTML = "";
+                document.getElementById("stockPrompts").innerHTML =
+                    '<div class="stats">Waiting for training to start...</div>';
+            }
+
+            // === Save / Load ===
+            // File format: 4-byte magic "BLLM", 4-byte header length (LE uint32),
+            // JSON header (UTF-8), then raw Float32 data: weights, Adam m, Adam v.
+
+            function saveModel() {
+                if (!worker) return;
+                worker.postMessage({ type: "save" });
+            }
+
+            function loadModel() {
+                const input = document.createElement("input");
+                input.type = "file";
+                input.accept = ".bllm";
+                input.onchange = async () => {
+                    const file = input.files[0];
+                    if (!file) return;
+                    const buf = await file.arrayBuffer();
+                    const model = deserializeModel(buf);
+                    if (!model) {
+                        alert("Invalid model file");
+                        return;
+                    }
+
+                    // Apply config to UI
+                    document.getElementById("nLayers").value =
+                        model.config.nLayers;
+                    document.getElementById("dModel").value =
+                        model.config.dModel;
+                    document.getElementById("nHeads").value =
+                        model.config.nHeads;
+                    document.getElementById("dFF").value = model.config.dFF;
+                    document.getElementById("maxSeqLen").value =
+                        model.config.maxSeqLen;
+                    document.getElementById("lr").value = model.lr;
+                    updateParamCount();
+
+                    // If we have a worker running, send the model to it
+                    if (worker) {
+                        worker.postMessage({
+                            type: "loadModel",
+                            config: model.config,
+                            weights: model.weights,
+                            optM: model.optM,
+                            optV: model.optV,
+                            optT: model.optT,
+                            savedStep: model.step,
+                            lr: model.lr,
+                        });
+                    } else if (textData) {
+                        // Start a new worker with loaded model
+                        pendingLoad = model;
+                        startTraining();
+                    } else {
+                        pendingLoad = model;
+                        document.getElementById("data-info").innerHTML +=
+                            ' <span class="stat-val">(model loaded, select data to train)</span>';
+                    }
+                };
+                input.click();
+            }
+
+            let pendingLoad = null;
+
+            function serializeModel(data) {
+                const header = JSON.stringify({
+                    version: 1,
+                    config: data.config,
+                    totalParams: data.weights.length,
+                    step: data.step,
+                    lr: data.lr,
+                    optT: data.optT,
+                    hasOptimizer: !!(data.optM && data.optV),
+                });
+                const headerBytes = new TextEncoder().encode(header);
+                const nFloats =
+                    data.weights.length +
+                    (data.optM ? data.optM.length : 0) +
+                    (data.optV ? data.optV.length : 0);
+                const buf = new ArrayBuffer(
+                    8 + headerBytes.length + nFloats * 4,
+                );
+                const view = new DataView(buf);
+                // Magic
+                view.setUint8(0, 66);
+                view.setUint8(1, 76);
+                view.setUint8(2, 76);
+                view.setUint8(3, 77); // "BLLM"
+                view.setUint32(4, headerBytes.length, true);
+                new Uint8Array(buf, 8, headerBytes.length).set(headerBytes);
+                let off = 8 + headerBytes.length;
+                new Float32Array(buf, off, data.weights.length).set(
+                    data.weights,
+                );
+                off += data.weights.length * 4;
+                if (data.optM) {
+                    new Float32Array(buf, off, data.optM.length).set(data.optM);
+                    off += data.optM.length * 4;
+                }
+                if (data.optV) {
+                    new Float32Array(buf, off, data.optV.length).set(data.optV);
+                }
+                return buf;
+            }
+
+            function deserializeModel(buf) {
+                try {
+                    const view = new DataView(buf);
+                    if (
+                        view.getUint8(0) !== 66 ||
+                        view.getUint8(1) !== 76 ||
+                        view.getUint8(2) !== 76 ||
+                        view.getUint8(3) !== 77
+                    )
+                        return null;
+                    const hLen = view.getUint32(4, true);
+                    const headerStr = new TextDecoder().decode(
+                        new Uint8Array(buf, 8, hLen),
+                    );
+                    const header = JSON.parse(headerStr);
+                    let off = 8 + hLen;
+                    const n = header.totalParams;
+                    const weights = new Float32Array(
+                        buf.slice(off, off + n * 4),
+                    );
+                    off += n * 4;
+                    let optM = null,
+                        optV = null;
+                    if (header.hasOptimizer && off + n * 8 <= buf.byteLength) {
+                        optM = new Float32Array(buf.slice(off, off + n * 4));
+                        off += n * 4;
+                        optV = new Float32Array(buf.slice(off, off + n * 4));
+                    }
+                    return {
+                        config: header.config,
+                        weights,
+                        optM,
+                        optV,
+                        optT: header.optT || 0,
+                        step: header.step || 0,
+                        lr: header.lr || 3e-4,
+                    };
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            async function triggerDownload(buf, filename) {
+                if (window.showSaveFilePicker) {
+                    try {
+                        const handle = await window.showSaveFilePicker({
+                            suggestedName: filename,
+                            types: [
+                                {
+                                    description: "Browser LLM Model",
+                                    accept: {
+                                        "application/octet-stream": [".bllm"],
+                                    },
+                                },
+                            ],
+                        });
+                        const writable = await handle.createWritable();
+                        await writable.write(buf);
+                        await writable.close();
+                        return;
+                    } catch (e) {
+                        if (e.name === "AbortError") return;
+                    }
+                }
+                // Fallback: download link
+                const blob = new Blob([buf], {
+                    type: "application/octet-stream",
+                });
+                const a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = filename;
+                a.click();
+                URL.revokeObjectURL(a.href);
+            }
+
+            function handleWorkerMessage(e) {
+                const msg = e.data;
+                switch (msg.type) {
+                    case "ready":
+                        const modeLabels = {
+                            "gpu-full": "GPU Full (WebGL2)",
+                            "gpu-matmul": "GPU MatMul (WebGL2)",
+                            cpu: "CPU",
+                        };
+                        document.getElementById("param-count").innerHTML =
+                            `Parameters: <span class="stat-val">${(msg.totalParams / 1000).toFixed(1)}K</span>` +
+                            ` | Compute: <span class="stat-val">${modeLabels[msg.gpu] || msg.gpu}</span>`;
+                        worker.postMessage({ type: "start" });
+                        break;
+
+                    case "step":
+                        document.getElementById("step-display").textContent =
+                            msg.step;
+                        document.getElementById("loss-display").textContent =
+                            msg.loss.toFixed(4);
+                        document.getElementById("speed-display").textContent =
+                            msg.charsPerSec.toLocaleString();
+                        document.getElementById("lr-display").textContent =
+                            msg.lr.toExponential(1);
+                        lossHistory.push(msg.loss);
+                        if (lossHistory.length % 5 === 0) drawLossChart();
+                        break;
+
+                    case "generated":
+                        showGeneration(msg.text, msg.id);
+                        generating = false;
+                        document.getElementById("btn-gen").disabled = false;
+                        break;
+
+                    case "stockPrompts":
+                        showStockPrompts(msg.results, msg.step);
+                        break;
+
+                    case "error":
+                        alert("Training error: " + msg.message);
+                        stopTraining();
+                        break;
+
+                    case "saveData": {
+                        const buf = serializeModel(msg);
+                        const stepStr = String(msg.step).padStart(6, "0");
+                        triggerDownload(buf, `browser-llm-step${stepStr}.bllm`);
+                        break;
+                    }
+
+                    case "modelLoaded":
+                        document.getElementById("step-display").textContent =
+                            msg.step;
+                        break;
+                }
+            }
+
+            // === Generation ===
+            function generate() {
+                if (!worker || generating) return;
+                const prompt = document.getElementById("prompt").value;
+                if (!prompt) return;
+                generating = true;
+                document.getElementById("btn-gen").disabled = true;
+                document.getElementById("output").innerHTML =
+                    '<span class="prompt-text">Generating...</span>';
+                worker.postMessage({
+                    type: "generate",
+                    prompt,
+                    maxTokens: +document.getElementById("maxTokens").value,
+                    temperature: +document.getElementById("temperature").value,
+                    id: "user",
+                });
+            }
+
+            function showGeneration(text, id) {
+                if (id !== "user") return;
+                const prompt = document.getElementById("prompt").value;
+                const el = document.getElementById("output");
+                el.innerHTML = "";
+                const pSpan = document.createElement("span");
+                pSpan.className = "prompt-text";
+                pSpan.textContent = text.substring(0, prompt.length);
+                const gSpan = document.createElement("span");
+                gSpan.className = "gen-text";
+                gSpan.textContent = text.substring(prompt.length);
+                el.appendChild(pSpan);
+                el.appendChild(gSpan);
+            }
+
+            // === Stock prompts display ===
+            let stockHistory = []; // [{step, results}]
+
+            function showStockPrompts(results, step) {
+                stockHistory.push({ step, results });
+                if (stockHistory.length > 20) stockHistory.shift();
+
+                const container = document.getElementById("stockPrompts");
+                container.innerHTML = "";
+
+                // Show latest results
+                for (const r of results) {
+                    const div = document.createElement("div");
+                    div.className = "stock-entry";
+                    div.innerHTML =
+                        `<div class="step-label">Step ${step}</div>` +
+                        `<span class="prompt-text">${escapeHtml(r.prompt)}</span>` +
+                        `<span class="gen-text">${escapeHtml(r.completion.substring(r.prompt.length))}</span>`;
+                    container.appendChild(div);
+                }
+            }
+
+            function escapeHtml(s) {
+                return s
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;");
+            }
+
+            // === Loss chart ===
+            function drawLossChart() {
+                const canvas = document.getElementById("lossChart");
+                const ctx = canvas.getContext("2d");
+                const W = (canvas.width =
+                    canvas.offsetWidth * devicePixelRatio);
+                const H = (canvas.height = 150 * devicePixelRatio);
+                ctx.scale(devicePixelRatio, devicePixelRatio);
+                const w = canvas.offsetWidth,
+                    h = 150;
+
+                ctx.fillStyle = "#0d1117";
+                ctx.fillRect(0, 0, w, h);
+
+                if (lossHistory.length < 2) return;
+
+                // Use a moving average for smoother display
+                const windowSize = Math.max(
+                    1,
+                    Math.floor(lossHistory.length / 200),
+                );
+                const smoothed = [];
+                for (let i = 0; i < lossHistory.length; i += windowSize) {
+                    let sum = 0,
+                        count = 0;
+                    for (
+                        let j = i;
+                        j < Math.min(i + windowSize, lossHistory.length);
+                        j++
+                    ) {
+                        sum += lossHistory[j];
+                        count++;
+                    }
+                    smoothed.push(sum / count);
+                }
+
+                const maxLoss = Math.max(...smoothed);
+                const minLoss = Math.min(...smoothed);
+                const range = maxLoss - minLoss || 1;
+                const pad = 30;
+
+                // Grid lines
+                ctx.strokeStyle = "#21262d";
+                ctx.lineWidth = 1;
+                for (let i = 0; i <= 4; i++) {
+                    const y = pad + ((h - 2 * pad) * i) / 4;
+                    ctx.beginPath();
+                    ctx.moveTo(pad, y);
+                    ctx.lineTo(w - 10, y);
+                    ctx.stroke();
+                    ctx.fillStyle = "#484f58";
+                    ctx.font = "10px monospace";
+                    ctx.textAlign = "right";
+                    ctx.fillText(
+                        (maxLoss - (range * i) / 4).toFixed(2),
+                        pad - 4,
+                        y + 4,
+                    );
+                }
+
+                // Loss curve
+                ctx.strokeStyle = "#58a6ff";
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                for (let i = 0; i < smoothed.length; i++) {
+                    const x =
+                        pad + ((w - pad - 10) * i) / (smoothed.length - 1);
+                    const y =
+                        pad +
+                        (h - 2 * pad) * (1 - (smoothed[i] - minLoss) / range);
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Labels
+                ctx.fillStyle = "#8b949e";
+                ctx.font = "10px monospace";
+                ctx.textAlign = "center";
+                ctx.fillText(`Step ${lossHistory.length}`, w / 2, h - 4);
+            }
+
+            // Handle LR changes live
+            document
+                .getElementById("lr")
+                .addEventListener("change", function () {
+                    if (worker)
+                        worker.postMessage({ type: "setLR", lr: +this.value });
+                });
+
+            // Keyboard shortcut: Enter to generate
+            document
+                .getElementById("prompt")
+                .addEventListener("keydown", function (e) {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        generate();
+                    }
+                });
+        </script>
+    </body>
+</html>
