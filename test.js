@@ -2,7 +2,7 @@
 
 // Run with: node test.js
 const { Transformer, AdamW } = require('./transformer.js');
-const { CharTokenizer } = require('./tokenizer.js');
+const { CharTokenizer, BPETokenizer } = require('./tokenizer.js');
 
 function assert(cond, msg) {
     if (!cond) throw new Error('FAIL: ' + msg);
@@ -159,14 +159,84 @@ function testAdamW() {
     console.log('  PASSED');
 }
 
+// === Test 6: BPE tokenizer ===
+function testBPE() {
+    console.log('Test 6: BPE tokenizer...');
+
+    // Empty merges should behave like CharTokenizer
+    const bpe0 = new BPETokenizer([]);
+    assert(bpe0.vocabSize === 128, 'Empty BPE should have vocabSize 128');
+    const rt0 = bpe0.decode(bpe0.encode('Hello'));
+    assert(rt0 === 'Hello', `Empty BPE roundtrip failed: "${rt0}"`);
+
+    // Train on a corpus with clear repeated patterns
+    const corpus = 'abab abab abab cdcd cdcd';
+    const charTok = new CharTokenizer();
+    const baseTokens = charTok.encode(corpus);
+    const bpe = BPETokenizer.train(baseTokens, 135); // 128 + 7 merges
+
+    assert(bpe.vocabSize <= 135, `Vocab size ${bpe.vocabSize} exceeds target`);
+    assert(bpe.merges.length > 0, 'Should have learned some merges');
+
+    // First merge should be the most frequent pair: 'a','b' (occurs 6 times)
+    const firstMerge = bpe.merges[0];
+    const firstStr = bpe._decode[128];
+    assert(firstStr === 'ab', `First merge should be "ab", got "${firstStr}"`);
+
+    // Roundtrip
+    const encoded = bpe.encode(corpus);
+    const decoded = bpe.decode(encoded);
+    assert(decoded === corpus, `BPE roundtrip failed: "${decoded}"`);
+
+    // Compression: encoded should be shorter than original
+    assert(encoded.length < corpus.length, `BPE should compress: ${encoded.length} >= ${corpus.length}`);
+
+    // encodePre should give same result as encode
+    const encodedPre = bpe.encodePre(baseTokens);
+    assert(encodedPre.length === encoded.length, 'encodePre length mismatch');
+    for (let i = 0; i < encoded.length; i++)
+        assert(encoded[i] === encodedPre[i], `encodePre mismatch at ${i}`);
+
+    // Larger corpus training
+    const bigCorpus = 'the cat sat on the mat. the cat sat on the mat. '.repeat(100);
+    const bigBase = charTok.encode(bigCorpus);
+    const bpe2 = BPETokenizer.train(bigBase, 200);
+    assert(bpe2.vocabSize <= 200, `Big corpus vocab ${bpe2.vocabSize} exceeds 200`);
+    const decoded2 = bpe2.decode(bpe2.encode(bigCorpus));
+    assert(decoded2 === bigCorpus, 'Big corpus roundtrip failed');
+    const ratio = bpe2.encode(bigCorpus).length / bigCorpus.length;
+    console.log(`  Compression ratio: ${ratio.toFixed(3)} (${bpe2.merges.length} merges)`);
+    assert(ratio < 0.5, `Expected good compression, got ratio ${ratio}`);
+
+    console.log('  PASSED');
+}
+
+// === Test 7: BPE with transformer ===
+function testBPETransformer() {
+    console.log('Test 7: BPE + transformer...');
+    const merges = [[116, 104], [128, 101]]; // 'th' -> 128, 'the' -> 129
+    const bpe = new BPETokenizer(merges);
+    assert(bpe.vocabSize === 130, `Expected vocabSize 130, got ${bpe.vocabSize}`);
+
+    const config = { vocabSize: 130, dModel: 16, nHeads: 2, nLayers: 1, dFF: 32, maxSeqLen: 8 };
+    const model = new Transformer(config);
+    const input = bpe.encode('the cat');
+    assert(input.length < 7, `BPE should compress "the cat" below 7 tokens, got ${input.length}`);
+    const { logits } = model.forward(input);
+    assert(logits.length === input.length * 130, 'Logits shape mismatch');
+    console.log('  PASSED');
+}
+
 // === Run all tests ===
 console.log('Running tests...\n');
 try {
     testTokenizer();
+    testBPE();
     testGradientCheck();
     testLossDecreases();
     testGenerate();
     testAdamW();
+    testBPETransformer();
     console.log('\nAll tests passed!');
 } catch (e) {
     console.error('\n' + e.message);

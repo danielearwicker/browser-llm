@@ -62,7 +62,7 @@ self.onmessage = function (e) {
     const msg = e.data;
     switch (msg.type) {
         case "init": {
-            tokenizer = new CharTokenizer();
+            tokenizer = new BPETokenizer(msg.merges || []);
             const lr = msg.lr || 3e-4;
 
             // Try full GPU pipeline first
@@ -127,13 +127,14 @@ self.onmessage = function (e) {
                 lr = optimizer.lr;
             }
             const config = gpuTrainer ? gpuTrainer.config : transformer.config;
-            self.postMessage({ type: "saveData", weights, optM, optV, optT, step, lr, config });
+            self.postMessage({ type: "saveData", weights, optM, optV, optT, step, lr, config, merges: tokenizer.merges });
             break;
         }
 
         case "loadModel": {
-            const { config, weights, optM, optV, optT, savedStep, lr } = msg;
+            const { config, weights, optM, optV, optT, savedStep, lr, merges } = msg;
             step = savedStep || 0;
+            tokenizer = new BPETokenizer(merges || []);
             if (gpuTrainer) {
                 gpuTrainer.uploadWeights(weights);
                 if (optM && optV) gpuTrainer.uploadOptimizer(optM, optV, optT || 0);

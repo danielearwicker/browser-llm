@@ -192,6 +192,7 @@
                             Medium (4L, d128)
                         </option>
                         <option value="large">Large (6L, d192)</option>
+                        <option value="xl">XL (8L, d256)</option>
                     </select>
                 </label>
             </div>
@@ -238,6 +239,16 @@
                         min="32"
                         max="1024"
                         step="32"
+                /></label>
+                <label
+                    >Vocab size
+                    <input
+                        type="number"
+                        id="targetVocabSize"
+                        value="2000"
+                        min="256"
+                        max="8000"
+                        step="128"
                 /></label>
             </div>
             <div class="controls">
@@ -344,10 +355,12 @@
         <script>
             // === State ===
             let worker = null;
-            let textData = null; // Uint16Array
-            let textString = "";
+            let textData = null; // Uint16Array (BPE-encoded)
+            let loadedFiles = null; // kept for re-encoding on restart
+            let currentMerges = []; // BPE merge table
             let lossHistory = [];
             let generating = false;
+            let autoStartTraining = false;
 
             // === File System Access API ===
             if (!window.showDirectoryPicker) {
@@ -366,26 +379,46 @@
                         return;
                     }
 
-                    // Encode each file's text incrementally to avoid a single huge string
-                    const encoder = new CharTokenizer_inline();
-                    const sep = encoder.encode("\n\n");
-                    const chunks = [];
+                    loadedFiles = files;
+
+                    // Step 1: Encode all text as base ASCII tokens incrementally
+                    const charEnc = new CharTokenizer_inline();
+                    const sepTok = charEnc.encode("\n\n");
+                    const baseChunks = [];
                     let totalChars = 0;
                     for (let i = 0; i < files.length; i++) {
-                        if (i > 0) chunks.push(sep);
-                        chunks.push(encoder.encode(files[i].text));
+                        if (i > 0) baseChunks.push(sepTok);
+                        baseChunks.push(charEnc.encode(files[i].text));
                         totalChars += files[i].text.length + (i > 0 ? 2 : 0);
                     }
-                    let totalTokens = chunks.reduce((s, c) => s + c.length, 0);
-                    textData = new Uint16Array(totalTokens);
+                    let baseLen = baseChunks.reduce((s, c) => s + c.length, 0);
+                    const baseTokens = new Uint16Array(baseLen);
                     let off = 0;
-                    for (const c of chunks) { textData.set(c, off); off += c.length; }
-                    textString = ''; // not needed for training, avoid keeping huge string in memory
+                    for (const c of baseChunks) { baseTokens.set(c, off); off += c.length; }
+
+                    // Step 2: Train BPE on the base tokens
+                    const targetVocab = +document.getElementById("targetVocabSize").value;
+                    document.getElementById("data-info").innerHTML =
+                        `<span class="stat-val">${files.length}</span> files, ` +
+                        `<span class="stat-val">${(totalChars / 1024).toFixed(1)}</span> KB text — ` +
+                        `<span class="stat-val">training tokenizer...</span>`;
+
+                    const bpe = await BPETokenizer_inline.train(baseTokens, targetVocab,
+                        (done, total) => {
+                            document.getElementById("data-info").innerHTML =
+                                `Training tokenizer: merge ${done}/${total}...`;
+                        });
+                    currentMerges = bpe.merges;
+
+                    // Step 3: Encode with the trained BPE tokenizer
+                    textData = bpe.encodePre(baseTokens);
 
                     document.getElementById("data-info").innerHTML =
                         `<span class="stat-val">${files.length}</span> files, ` +
-                        `<span class="stat-val">${(totalChars / 1024).toFixed(1)}</span> KB text, ` +
-                        `<span class="stat-val">${totalTokens.toLocaleString()}</span> tokens`;
+                        `<span class="stat-val">${(totalChars / 1024).toFixed(1)}</span> KB, ` +
+                        `<span class="stat-val">${textData.length.toLocaleString()}</span> tokens ` +
+                        `(vocab <span class="stat-val">${bpe.vocabSize}</span>, ` +
+                        `${(textData.length / baseLen * 100).toFixed(0)}% of char-level)`;
                     document.getElementById("btn-start").disabled = false;
                     updateParamCount();
                 } catch (e) {
@@ -442,10 +475,9 @@
             }
 
             // Inline tokenizer for main thread
+            // Inline char tokenizer (used only for base-token encoding before BPE)
             class CharTokenizer_inline {
-                constructor() {
-                    this.vocabSize = 128;
-                }
+                constructor() { this.vocabSize = 128; }
                 encode(str) {
                     const ids = new Uint16Array(str.length);
                     for (let i = 0; i < str.length; i++) {
@@ -454,11 +486,80 @@
                     }
                     return ids;
                 }
-                decode(ids) {
-                    let s = "";
-                    for (let i = 0; i < ids.length; i++)
-                        s += String.fromCharCode(ids[i]);
-                    return s;
+            }
+
+            // Inline BPE tokenizer (mirrors tokenizer.js BPETokenizer)
+            class BPETokenizer_inline {
+                constructor(merges) {
+                    this.merges = merges || [];
+                    this.vocabSize = 128 + this.merges.length;
+                    this._decode = new Array(this.vocabSize);
+                    for (var i = 0; i < 128; i++) this._decode[i] = String.fromCharCode(i);
+                    for (var i = 0; i < this.merges.length; i++)
+                        this._decode[128 + i] = this._decode[this.merges[i][0]] + this._decode[this.merges[i][1]];
+                    // Integer-keyed merge lookup for fast encoding
+                    this._mergeMap = new Map();
+                    for (var i = 0; i < this.merges.length; i++) {
+                        var key = this.merges[i][0] * 65536 + this.merges[i][1];
+                        if (!this._mergeMap.has(key)) this._mergeMap.set(key, 128 + i);
+                    }
+                }
+                // Async training: yields to UI every 50 merges. Uses integer Map keys.
+                static async train(baseTokens, targetVocabSize, onProgress) {
+                    targetVocabSize = targetVocabSize || 2000;
+                    var numMerges = Math.max(0, targetVocabSize - 128);
+                    var merges = [];
+                    var maxSample = 2000000;
+                    var sampleLen = Math.min(baseTokens.length, maxSample);
+                    var tokens = new Uint16Array(sampleLen);
+                    for (var i = 0; i < sampleLen; i++) tokens[i] = baseTokens[i];
+                    var len = sampleLen;
+                    for (var m = 0; m < numMerges; m++) {
+                        if (len < 2) break;
+                        var counts = new Map();
+                        var bestKey = -1, bestCount = 0;
+                        for (var i = 0; i < len - 1; i++) {
+                            var key = tokens[i] * 65536 + tokens[i + 1];
+                            var c = (counts.get(key) || 0) + 1;
+                            counts.set(key, c);
+                            if (c > bestCount) { bestCount = c; bestKey = key; }
+                        }
+                        if (bestCount < 2) break;
+                        var a = (bestKey >>> 16), b = (bestKey & 0xFFFF);
+                        merges.push([a, b]);
+                        var newId = 128 + m, write = 0;
+                        for (var i = 0; i < len; i++) {
+                            if (i < len - 1 && tokens[i] === a && tokens[i + 1] === b) {
+                                tokens[write++] = newId; i++;
+                            } else { tokens[write++] = tokens[i]; }
+                        }
+                        len = write;
+                        if (m % 50 === 0) {
+                            if (onProgress) onProgress(m, numMerges);
+                            await new Promise(r => setTimeout(r, 0));
+                        }
+                    }
+                    return new BPETokenizer_inline(merges);
+                }
+                // Greedy multi-merge: converges in ~10 rounds, not 1872 passes
+                encodePre(baseTokens) {
+                    var len = baseTokens.length, map = this._mergeMap;
+                    var changed = true;
+                    while (changed) {
+                        changed = false;
+                        var write = 0;
+                        for (var i = 0; i < len; i++) {
+                            if (i < len - 1) {
+                                var newId = map.get(baseTokens[i] * 65536 + baseTokens[i + 1]);
+                                if (newId !== undefined) {
+                                    baseTokens[write++] = newId; i++; changed = true; continue;
+                                }
+                            }
+                            baseTokens[write++] = baseTokens[i];
+                        }
+                        len = write;
+                    }
+                    return baseTokens.subarray(0, len);
                 }
             }
 
@@ -485,6 +586,13 @@
                     dFF: 768,
                     maxSeqLen: 256,
                 },
+                xl: {
+                    nLayers: 8,
+                    dModel: 256,
+                    nHeads: 8,
+                    dFF: 1024,
+                    maxSeqLen: 256,
+                },
             };
 
             function applyPreset() {
@@ -499,7 +607,7 @@
 
             function getConfig() {
                 return {
-                    vocabSize: 128,
+                    vocabSize: 128 + (currentMerges ? currentMerges.length : 0),
                     nLayers: +document.getElementById("nLayers").value,
                     dModel: +document.getElementById("dModel").value,
                     nHeads: +document.getElementById("nHeads").value,
@@ -544,11 +652,33 @@
             }
 
             // === Training ===
+            function reEncodeTextData() {
+                // Re-encode from stored files if textData buffer was transferred
+                if (textData && textData.length > 0 && textData.buffer.byteLength > 0) return;
+                if (!loadedFiles || !currentMerges) return;
+                const charEnc = new CharTokenizer_inline();
+                const bpe = new BPETokenizer_inline(currentMerges);
+                const sepTok = charEnc.encode("\n\n");
+                const baseChunks = [];
+                for (var i = 0; i < loadedFiles.length; i++) {
+                    if (i > 0) baseChunks.push(sepTok);
+                    baseChunks.push(charEnc.encode(loadedFiles[i].text));
+                }
+                var baseLen = baseChunks.reduce((s, c) => s + c.length, 0);
+                var baseTokens = new Uint16Array(baseLen);
+                var off = 0;
+                for (const c of baseChunks) { baseTokens.set(c, off); off += c.length; }
+                textData = bpe.encodePre(baseTokens);
+            }
+
             function startTraining() {
                 if (worker) worker.terminate();
+                autoStartTraining = true;
                 lossHistory = [];
                 document.getElementById("step-display").textContent = "0";
                 document.getElementById("loss-display").textContent = "-";
+
+                reEncodeTextData();
 
                 const config = pendingLoad ? pendingLoad.config : getConfig();
                 const lr = pendingLoad
@@ -558,13 +688,15 @@
                 worker = new Worker("train-worker.js");
                 worker.onmessage = handleWorkerMessage;
 
-                worker.postMessage({
+                const msg = {
                     type: "init",
                     config,
                     lr,
                     textData: textData,
+                    merges: currentMerges || [],
                     stockPrompts: pickStockPrompts(),
-                });
+                };
+                worker.postMessage(msg, [textData.buffer]);
 
                 // If we have a pending model load, send it after init
                 if (pendingLoad) {
@@ -582,6 +714,7 @@
                                 optT: pl.optT,
                                 savedStep: pl.step,
                                 lr: pl.lr,
+                                merges: pl.merges || [],
                             });
                         }
                         origOnMsg(e);
@@ -642,7 +775,8 @@
                         return;
                     }
 
-                    // Apply config to UI
+                    // Apply config and merge table to UI/state
+                    currentMerges = model.merges || [];
                     document.getElementById("nLayers").value =
                         model.config.nLayers;
                     document.getElementById("dModel").value =
@@ -652,11 +786,13 @@
                     document.getElementById("dFF").value = model.config.dFF;
                     document.getElementById("maxSeqLen").value =
                         model.config.maxSeqLen;
+                    document.getElementById("targetVocabSize").value =
+                        model.config.vocabSize;
                     document.getElementById("lr").value = model.lr;
                     updateParamCount();
 
-                    // If we have a worker running, send the model to it
                     if (worker) {
+                        // Send model to running worker
                         worker.postMessage({
                             type: "loadModel",
                             config: model.config,
@@ -666,15 +802,12 @@
                             optT: model.optT,
                             savedStep: model.step,
                             lr: model.lr,
+                            merges: model.merges || [],
                         });
-                    } else if (textData) {
-                        // Start a new worker with loaded model
-                        pendingLoad = model;
-                        startTraining();
                     } else {
+                        // Spin up a worker with the loaded model (for generation even without training data)
                         pendingLoad = model;
-                        document.getElementById("data-info").innerHTML +=
-                            ' <span class="stat-val">(model loaded, select data to train)</span>';
+                        startInferenceWorker(model);
                     }
                 };
                 input.click();
@@ -682,10 +815,52 @@
 
             let pendingLoad = null;
 
+            function startInferenceWorker(model) {
+                if (worker) worker.terminate();
+                autoStartTraining = false;
+                worker = new Worker("train-worker.js");
+                worker.onmessage = handleWorkerMessage;
+                // Init with empty training data — just for generation
+                worker.postMessage({
+                    type: "init",
+                    config: model.config,
+                    lr: model.lr,
+                    textData: new Uint16Array(0),
+                    merges: model.merges || [],
+                    stockPrompts: [],
+                });
+                // After init, load the saved weights
+                const origOnMsg = worker.onmessage;
+                worker.onmessage = function(e) {
+                    if (e.data.type === "ready") {
+                        worker.postMessage({
+                            type: "loadModel",
+                            config: model.config,
+                            weights: model.weights,
+                            optM: model.optM,
+                            optV: model.optV,
+                            optT: model.optT,
+                            savedStep: model.step,
+                            lr: model.lr,
+                            merges: model.merges || [],
+                        });
+                        worker.onmessage = origOnMsg;
+                        document.getElementById("step-display").textContent = model.step;
+                    }
+                    origOnMsg(e);
+                };
+                document.getElementById("btn-gen").disabled = false;
+                document.getElementById("btn-save").disabled = false;
+                document.getElementById("btn-start").disabled = !textData;
+                document.getElementById("data-info").innerHTML =
+                    '<span class="stat-val">Model loaded</span> — select data to continue training, or generate directly';
+            }
+
             function serializeModel(data) {
                 const header = JSON.stringify({
-                    version: 1,
+                    version: 2,
                     config: data.config,
+                    merges: currentMerges || [],
                     totalParams: data.weights.length,
                     step: data.step,
                     lr: data.lr,
@@ -697,9 +872,10 @@
                     data.weights.length +
                     (data.optM ? data.optM.length : 0) +
                     (data.optV ? data.optV.length : 0);
-                const buf = new ArrayBuffer(
-                    8 + headerBytes.length + nFloats * 4,
-                );
+                // Pad header to 4-byte alignment so Float32Array views work
+                const hPad = (4 - ((8 + headerBytes.length) % 4)) % 4;
+                const dataStart = 8 + headerBytes.length + hPad;
+                const buf = new ArrayBuffer(dataStart + nFloats * 4);
                 const view = new DataView(buf);
                 // Magic
                 view.setUint8(0, 66);
@@ -708,7 +884,7 @@
                 view.setUint8(3, 77); // "BLLM"
                 view.setUint32(4, headerBytes.length, true);
                 new Uint8Array(buf, 8, headerBytes.length).set(headerBytes);
-                let off = 8 + headerBytes.length;
+                let off = dataStart;
                 new Float32Array(buf, off, data.weights.length).set(
                     data.weights,
                 );
@@ -738,7 +914,8 @@
                         new Uint8Array(buf, 8, hLen),
                     );
                     const header = JSON.parse(headerStr);
-                    let off = 8 + hLen;
+                    const hPad = (4 - ((8 + hLen) % 4)) % 4;
+                    let off = 8 + hLen + hPad;
                     const n = header.totalParams;
                     const weights = new Float32Array(
                         buf.slice(off, off + n * 4),
@@ -753,6 +930,7 @@
                     }
                     return {
                         config: header.config,
+                        merges: header.merges || [],
                         weights,
                         optM,
                         optV,
@@ -810,7 +988,8 @@
                         document.getElementById("param-count").innerHTML =
                             `Parameters: <span class="stat-val">${(msg.totalParams / 1000).toFixed(1)}K</span>` +
                             ` | Compute: <span class="stat-val">${modeLabels[msg.gpu] || msg.gpu}</span>`;
-                        worker.postMessage({ type: "start" });
+                        if (autoStartTraining)
+                            worker.postMessage({ type: "start" });
                         break;
 
                     case "step":
